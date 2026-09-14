@@ -1100,7 +1100,12 @@ export default class bingx extends bingxRest {
         if (this.newUpdates) {
             limit = trades.getLimit (symbol, limit);
         }
-        return this.filterBySymbolSinceLimit (trades, symbol, since, limit, true);
+        const result: Trade[] = [];
+        for (let i = 0; i < trades.length; i++) {
+            const entry = trades[i];
+            result.push (this.safeDict (entry, 'trade', entry) as Trade);
+        }
+        return this.filterBySymbolSinceLimit (result, symbol, since, limit, true);
     }
 
     /**
@@ -1704,9 +1709,70 @@ export default class bingx extends bingxRest {
         const spotHash = 'spot:mytrades';
         const swapHash = 'swap:mytrades';
         const messageHash = isSpot ? spotHash : swapHash;
-        cachedTrades.append (parsed);
+        if (isSpot) {
+            cachedTrades.append (parsed);
+        } else {
+            const entry = this.getSwapTradeCacheEntry (parsed, cachedTrades);
+            if (entry === undefined) {
+                return;
+            }
+            cachedTrades.append (entry);
+        }
         client.resolve (cachedTrades, messageHash);
         client.resolve (cachedTrades, messageHash + ':' + symbol);
+    }
+
+    getSwapTradeCacheEntry (trade: Trade, stored: ArrayCacheBySymbolById): NullableDict {
+        const symbol = this.safeString (trade, 'symbol');
+        const id = this.safeString (trade, 'id');
+        const orderId = this.safeString (trade, 'order');
+        const info = this.safeDict (trade, 'info', {});
+        const filled = this.safeString (info, 'z');
+        let match: Dict = {};
+        let matches = 0;
+        for (let i = 0; i < stored.length; i++) {
+            const entry = stored[i];
+            const previous = this.safeDict (entry, 'trade');
+            if ((previous === undefined) || (this.safeString (previous, 'symbol') !== symbol)) {
+                continue;
+            }
+            const previousId = this.safeString (previous, 'id');
+            if ((id !== undefined) && (previousId !== undefined)) {
+                if (id === previousId) {
+                    match = entry;
+                    matches = 1;
+                    break;
+                }
+                continue;
+            }
+            const previousInfo = this.safeDict (previous, 'info', {});
+            const previousFilled = this.safeString (previousInfo, 'z');
+            if ((orderId !== undefined) && (orderId === this.safeString (previous, 'order')) && Precise.stringGt (filled, '0') && Precise.stringEq (filled, previousFilled)) {
+                match = entry;
+                matches += 1;
+            }
+        }
+        let cacheId: Str = undefined;
+        if (matches === 1) {
+            const previous = this.safeDict (match, 'trade', {});
+            if (id === undefined) {
+                // Retain an exchange ID already observed for this execution.
+                trade['id'] = this.safeString (previous, 'id');
+            }
+            if (this.json (this.omit (trade, 'info')) === this.json (this.omit (previous, 'info'))) {
+                return undefined;
+            }
+            cacheId = this.safeString (match, 'id');
+        } else {
+            // Internal identity only: do not expose generated IDs in unified trades.
+            // Without a unique match, retain the event rather than merge distinct fills.
+            cacheId = 'swap:' + this.uuid ();
+        }
+        return {
+            'id': cacheId,
+            'symbol': symbol,
+            'trade': trade,
+        };
     }
 
     handleBalance (client: Client, message: any) {
@@ -1819,7 +1885,10 @@ export default class bingx extends bingxRest {
             const data = this.safeValue (message, 'o', {});
             const type = this.safeString (data, 'x');
             const status = this.safeString (data, 'X');
-            if ((type === 'TRADE') && (status === 'FILLED')) {
+            const lastAmount = this.safeString (data, 'l');
+            const lastPrice = this.safeString (data, 'L');
+            const hasLastFill = Precise.stringGt (lastAmount, '0') && Precise.stringGt (lastPrice, '0');
+            if ((type === 'TRADE') && ((status === 'FILLED') || ((status === 'PARTIALLY_FILLED') && hasLastFill))) {
                 this.handleMyTrades (client, message);
             }
         }
