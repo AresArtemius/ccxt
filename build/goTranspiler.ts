@@ -921,9 +921,8 @@ class NewTranspiler {
             [/Future\)/g, ''],  // Remove C# generics / casts that are invalid in Go
             [/;\s*\n/g, '\n'],  // Remove stray semicolons that leak from TS/CS syntax
             
-            // Local WS caches are boxed; preserve the concrete cache's Clear implementation.
-            [/\bcache\.Clear\(\)/g, 'cache.(interface{ Clear() }).Clear()'],
             [/\.Append\(/g, '.(Appender).Append('],
+            [/\.RemoveSymbol\(/g, '.(SymbolRemover).RemoveSymbol('],
             [/stored\.\(Appender\)\.Append\(this\.ParseOHLCV/g, "stored.Append(this.ParseOHLCV"],
             [/(stored|cached)?([Oo]rders)?\.Hashmap/g, '$1$2.(*ArrayCache).Hashmap'],
             [/stored := NewArrayCache\(limit\)/g, 'var stored any = NewArrayCache(limit)'],  // needed for cex HandleTradesSnapshot
