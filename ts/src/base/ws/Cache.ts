@@ -128,6 +128,41 @@ class ArrayCache extends BaseCache implements CustomArray {
         this.clearAllUpdates = false
     }
 
+    // drop every row filed under `key` - the symbol for the symbol-keyed caches,
+    // the outcome for ArrayCacheByOutcomeById - together with its bookkeeping.
+    // A caller that has to invalidate a single key must NOT reach for clear ():
+    // that wipes the counters of every OTHER key too, and re-appending the rows
+    // it meant to keep re-reports them to `newUpdates: false` consumers as fresh
+    // updates. Retracting one key keeps both poll scopes exact, because
+    // allNewUpdates is the sum of the per-key seenUpdatesAll sizes for the keyed
+    // subclasses, so the global counter loses precisely what this key put in.
+    removeSymbol (key) {
+        const keyField = (this.keyField === undefined) ? 'symbol' : this.keyField
+        // compact in place: splice on an Array subclass runs ArraySpeciesCreate
+        // and builds a throw-away cache instance, see removeAt above
+        let target = 0
+        const arrayLength = this.length
+        for (let i = 0; i < arrayLength; i++) {
+            const existing = this[i]
+            if (existing[keyField] !== key) {
+                this[target] = existing
+                target = target + 1
+            }
+        }
+        this.length = target
+        delete this.hashmap[key]
+        delete this.newUpdatesBySymbol[key]
+        delete this.seenUpdatesBySymbol[key]
+        delete this.clearUpdatesBySymbol[key]
+        // a plain ArrayCache has no per-key ledger for the global scope - it counts
+        // raw appends - so only the keyed subclasses can retract exactly; there the
+        // seen set IS this key's contribution since the last global poll
+        if (this.seenUpdatesAll[key] !== undefined) {
+            this.allNewUpdates = this.allNewUpdates - this.seenUpdatesAll[key].size
+            delete this.seenUpdatesAll[key]
+        }
+    }
+
     append (item) {
         // maxSize may be 0 when initialized by a .filter() copy-construction
         if (this.maxSize && (this.length === this.maxSize)) {

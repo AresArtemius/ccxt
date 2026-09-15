@@ -111,6 +111,40 @@ class ArrayCache(BaseCache):
         else:
             return new_updates_value
 
+    # drop every row filed under `key` - the symbol for the symbol-keyed caches,
+    # the outcome for ArrayCacheByOutcomeById - together with its bookkeeping.
+    # A caller that has to invalidate a single key must NOT reach for clear():
+    # that wipes the counters of every OTHER key too, and re-appending the rows
+    # it meant to keep re-reports them to `newUpdates: False` consumers as fresh
+    # updates. Retracting one key keeps both poll scopes exact, because
+    # _all_new_updates is the sum of the per-key _seen_updates_all sizes for the
+    # keyed subclasses, so the global counter loses precisely what this key put in
+    def removeSymbol(self, key: str) -> None:
+        # only ArrayCacheBySymbolById declares _key_field; a plain ArrayCache and
+        # ArrayCacheBySymbolBySide file their rows under 'symbol'
+        key_field = getattr(self, '_key_field', 'symbol')
+        # compact in place - deques support neither slice assignment nor an
+        # in-place filter, and rebuilding the object would strip its maxlen.
+        # row.get() (not row[...]): prediction trades carry 'outcome' not
+        # 'symbol', so a bare lookup raises KeyError where JS yields undefined
+        retained = [row for row in self._deque if row.get(key_field) != key]
+        self._deque.clear()
+        self._deque.extend(retained)
+        self.hashmap.pop(key, None)
+        self._new_updates_by_symbol.pop(key, None)
+        self._seen_updates_by_symbol.pop(key, None)
+        self._clear_updates_by_symbol.pop(key, None)
+        # a plain ArrayCache has no per-key ledger for the global scope - it counts
+        # raw appends - so only the keyed subclasses can retract exactly; there the
+        # seen set IS this key's contribution since the last global poll
+        all_seen = self._seen_updates_all.pop(key, None)
+        if all_seen is not None:
+            self._all_new_updates = self._all_new_updates - len(all_seen)
+
+    # support transpiled snake_case calls
+    def remove_symbol(self, key: str) -> None:
+        self.removeSymbol(key)
+
     def append(self, item: dict) -> None:
         # the deque evicts from the left on its own when max_size is truthy
         self._deque.append(item)
@@ -187,6 +221,18 @@ class ArrayCacheBySymbolById(ArrayCache):
     def clear(self) -> None:
         super(ArrayCacheBySymbolById, self).clear()
         self._index.clear()
+
+    # _index is positional with _deque, so the same positions have to leave both:
+    # a _deque-only filter leaves every later append() of an existing token
+    # resolving self._index.index(token) to a stale position, which then deletes
+    # and re-appends the wrong row. Collect the surviving tokens BEFORE super()
+    # compacts _deque, then re-sync - same shape as the clear() override above
+    def removeSymbol(self, key: str) -> None:
+        key_field = getattr(self, '_key_field', 'symbol')
+        retained_index = [token for row, token in zip(self._deque, self._index) if row.get(key_field) != key]
+        super(ArrayCacheBySymbolById, self).removeSymbol(key)
+        self._index.clear()
+        self._index.extend(retained_index)
 
     def append(self, item: dict) -> None:
         key = item[self._key_field]
@@ -281,6 +327,13 @@ class ArrayCacheBySymbolBySide(ArrayCache):
     def clear(self) -> None:
         super(ArrayCacheBySymbolBySide, self).clear()
         self._index.clear()
+
+    # keep _index positionally aligned with _deque, see ArrayCacheBySymbolById
+    def removeSymbol(self, key: str) -> None:
+        retained_index = [token for row, token in zip(self._deque, self._index) if row.get('symbol') != key]
+        super(ArrayCacheBySymbolBySide, self).removeSymbol(key)
+        self._index.clear()
+        self._index.extend(retained_index)
 
     def append(self, item: dict) -> None:
         symbol = item['symbol']

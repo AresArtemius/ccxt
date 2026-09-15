@@ -1383,6 +1383,15 @@ export default class bingx extends bingxRest {
             const timestamp = this.safeInteger (message, 'E');
             position['timestamp'] = timestamp;
             position['datetime'] = this.iso8601 (timestamp);
+            if (position['hedged'] === false) {
+                // A one-way update owns the whole symbol: parseWsPosition maps a
+                // non-zero `ps: BOTH` row to long/short, so a close or a reversal
+                // writes a DIFFERENT (symbol, side) key and the previous direction
+                // would otherwise stay in the cache forever. Retract the symbol
+                // instead of rebuilding the cache, so the update counters of every
+                // other symbol are left untouched.
+                cache.removeSymbol (symbol);
+            }
             newPositions.push (position);
             cache.append (position);
         }

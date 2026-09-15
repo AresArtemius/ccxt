@@ -89,4 +89,18 @@ class ArrayCacheBySymbolBySide extends ArrayCache {
         parent::clear();
         $this->index = array();
     }
+
+    # $index is positional - $index[$n] is the composite key of $deque[$n] - so a
+    # removeSymbol() that drops deque rows must drop the SAME positions here.
+    # Leaving it untouched (or unset()-ing without reindexing) desyncs the two
+    # arrays, and the array_search() in append() above then splices an unrelated
+    # position out of the deque on the next update of any surviving symbol
+    protected function compact_index($retained_positions) {
+        $compacted = array();
+        $retained_length = count($retained_positions);
+        for ($i = 0; $i < $retained_length; $i++) {
+            $compacted[] = $this->index[$retained_positions[$i]];
+        }
+        $this->index = $compacted;
+    }
 }

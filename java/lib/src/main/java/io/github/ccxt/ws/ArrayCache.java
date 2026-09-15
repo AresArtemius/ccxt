@@ -70,6 +70,14 @@ public class ArrayCache extends ArrayList<Object> {
     protected volatile boolean clearAllUpdates = false;
     /** true when {@link #seenUpdatesBySymbol} tracks distinct ids/sides per symbol. */
     protected boolean nestedNewUpdatesBySymbol = false;
+    /**
+     * First nesting level of the index; overridden to "outcome" by
+     * {@link ArrayCacheByOutcomeById}. Declared here rather than on the keyed subclass so
+     * {@link #removeSymbol} can read it, and defaulted to "symbol" — which is exactly what
+     * the TS {@code (this.keyField === undefined) ? 'symbol' : this.keyField} guard
+     * (Cache.ts:140) yields for every variant that reaches {@code removeSymbol}.
+     */
+    protected String keyField = "symbol";
 
     public ArrayCache(int maxSize) {
         super();
@@ -183,6 +191,68 @@ public class ArrayCache extends ArrayList<Object> {
         this.clearUpdatesBySymbol.clear();
         this.allNewUpdates = 0;
         this.clearAllUpdates = false;
+    }
+
+    /** {@link #keyField} with the TS {@code undefined -> 'symbol'} fallback (Cache.ts:140). */
+    protected String keyFieldName() {
+        return (this.keyField == null) ? "symbol" : this.keyField;
+    }
+
+    /**
+     * Drops every row filed under {@code key} — the symbol for the symbol-keyed caches, the
+     * outcome for {@link ArrayCacheByOutcomeById} — together with its bookkeeping.
+     * Mirrors {@code removeSymbol ()} at Cache.ts:139-164.
+     *
+     * <p>A caller that has to invalidate a single key must NOT reach for {@link #clear()}:
+     * that wipes the counters of every OTHER key too, and re-appending the rows it meant to
+     * keep re-reports them to {@code newUpdates: false} consumers as fresh updates. Retracting
+     * one key keeps both poll scopes exact, because {@link #allNewUpdates} is the sum of the
+     * per-key {@link #seenUpdatesAll} sizes for the keyed subclasses, so the global counter
+     * loses precisely what this key put in and no other key's counters move.
+     *
+     * <p><b>Why not {@code remove}.</b> This class extends {@code ArrayList<Object>}, whose
+     * {@code remove(int)} / {@code remove(Object)} overloads dispatch on the <i>static</i>
+     * argument type, so adding an overload there would silently change which method an
+     * existing {@code remove(0)} call site binds to. Generated exchange code reaches this one
+     * through {@code Helpers.callDynamically (cache, "removeSymbol", new Object[]{ symbol })},
+     * which resolves by name and arity — hence the single {@code Object} parameter.
+     *
+     * @param key the key-field value to retract; {@code null} folds to {@link #UNDEFINED_KEY}
+     *            exactly like JS object-key coercion, and an unknown key is a no-op
+     */
+    public synchronized void removeSymbol(Object key) {
+        String target = keyOf(key);
+        String field = this.keyFieldName();
+        // compact in place so the retained rows keep both their order and their identity:
+        // the keyed variants' hashmap and the move-to-end scan in append() hold references
+        // into this list, and indexOfIdentity() would stop finding rows that were copied
+        int retained = 0;
+        int arrayLength = this.size();
+        for (int i = 0; i < arrayLength; i++) {
+            Object existing = super.get(i);
+            if (!target.equals(keyOf(fieldOf(existing, field)))) {
+                if (retained != i) {
+                    super.set(retained, existing);
+                }
+                retained = retained + 1;
+            }
+        }
+        // TS truncates with `this.length = target`; drop the tail back-to-front so the
+        // surviving prefix is never shifted
+        for (int i = arrayLength - 1; i >= retained; i--) {
+            super.remove(i);
+        }
+        this.hashmap.remove(target);
+        this.newUpdatesBySymbol.remove(target);
+        this.seenUpdatesBySymbol.remove(target);
+        this.clearUpdatesBySymbol.remove(target);
+        // a plain ArrayCache has no per-key ledger for the global scope — it counts raw
+        // appends — so only the keyed subclasses can retract exactly; there the seen set IS
+        // this key's contribution since the last global poll
+        Set<String> allSeen = this.seenUpdatesAll.remove(target);
+        if (allSeen != null) {
+            this.allNewUpdates = this.allNewUpdates - allSeen.size();
+        }
     }
 
     /**
@@ -305,6 +375,29 @@ public class ArrayCache extends ArrayList<Object> {
             this.clearUpdates = false;
         }
 
+        /**
+         * Java-only reconciliation. In TS this class extends {@code BaseCache}, so it never
+         * inherits {@code removeSymbol ()} at all; Java keeps the {@code extends ArrayCache}
+         * edge for the {@code instanceof} checks in {@code BaseExchange}, which means the
+         * method <i>is</i> reachable here. Its index is keyed by timestamp rather than by the
+         * key field, so the inherited {@code hashmap.remove(key)} would clean nothing: a
+         * map-shaped row carrying a {@code symbol} entry would leave the list while
+         * {@code hashmap} kept claiming it, and the next {@code append} of that timestamp
+         * would merge into the orphan and then lose the row (the same failure mode documented
+         * on {@link ArrayCache#clear()}). Re-derive the index from the rows that survived.
+         */
+        @Override
+        public synchronized void removeSymbol(Object key) {
+            super.removeSymbol(key);
+            Set<String> surviving = new LinkedHashSet<String>();
+            for (int i = 0, n = this.size(); i < n; i++) {
+                surviving.add(keyOf(timestampKeyOf(this.get(i))));
+            }
+            this.hashmap.keySet().retainAll(surviving);
+            this.sizeTracker.retainAll(surviving);
+            this.timestampNewUpdates = this.sizeTracker.size();
+        }
+
         @Override
         public synchronized void append(Object item) {
             String key = keyOf(timestampKeyOf(item));
@@ -341,9 +434,6 @@ public class ArrayCache extends ArrayList<Object> {
      * Writes through to {@code hashmap[symbol][id]} (Cache.ts:168-227).
      */
     public static class ArrayCacheBySymbolById extends ArrayCache {
-
-        /** First nesting level; overridden by {@link ArrayCacheByOutcomeById}. */
-        protected String keyField = "symbol";
 
         public ArrayCacheBySymbolById(int maxSize) {
             super(maxSize);
