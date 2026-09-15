@@ -159,6 +159,93 @@ public class ArrayCache : BaseCache
         }
     }
 
+    // drop every row filed under `key` - the symbol for the symbol-keyed caches,
+    // the outcome for ArrayCacheByOutcomeById - together with its bookkeeping.
+    // A caller that has to invalidate a single key must NOT reach for clear ():
+    // that wipes the counters of every OTHER key too, and re-appending the rows
+    // it meant to keep re-reports them to `newUpdates: false` consumers as fresh
+    // updates. Retracting one key keeps both poll scopes exact, because
+    // allNewUpdates is the sum of the per-key seenUpdatesAll sizes for the keyed
+    // subclasses, so the global counter loses precisely what this key put in.
+    // NOTE the lowercase name: IList<object> already carries Remove / RemoveAt,
+    // and the generated exchange code dispatches through
+    // callDynamically (cache, "removeSymbol", ...) by that exact string, with the
+    // key boxed as object - hence the object parameter rather than string.
+    public virtual void removeSymbol(object key)
+    {
+        lock (this.lockObject)
+        {
+            _removeSymbol(key);
+        }
+    }
+
+    // the TS `(this.keyField === undefined) ? 'symbol' : this.keyField` guard.
+    // Only ArrayCacheBySymbolById declares a keyField, so the plain ArrayCache
+    // and ArrayCacheBySymbolBySide file their rows under "symbol".
+    protected virtual string getKeyField()
+    {
+        return "symbol";
+    }
+
+    // append () derives every hashmap and counter key through Exchange.SafeString,
+    // so a key arriving from the outside has to be stringified the SAME way or a
+    // boxed Int64 / decimal key would never match the entry that is stored.
+    protected static string safeKey(object key)
+    {
+        return Exchange.SafeString(new Dictionary<string, object>() { { "key", key } }, "key");
+    }
+
+    // Dictionary.Remove throws ArgumentNullException on a null key, where the TS
+    // `delete obj[key]` is a silent no-op both for a null and for an absent key.
+    // append () can never have filed bookkeeping under a null key (its own
+    // TryGetValue would have thrown first), so there is nothing to drop then.
+    protected static void removeKey<T>(Dictionary<string, T> map, string key)
+    {
+        if (key != null)
+        {
+            map.Remove(key);
+        }
+    }
+
+    private void _removeSymbol(object key)
+    {
+        var keyField = this.getKeyField();
+        var keyString = safeKey(key);
+        // filter off a snapshot and rewrite the list in ONE pass:
+        // SlimConcurrentList's enumerator hands out a copy, so removing inside a
+        // foreach would index into a list the loop can no longer see, and
+        // per-element RemoveAt would take the write lock once per row. The
+        // retained rows keep their relative order, like the TS in-place compaction.
+        var rows = this.ToArray();
+        var retained = new List<object>(rows.Length);
+        for (var i = 0; i < rows.Length; i++)
+        {
+            var existing = rows[i];
+            if (Exchange.SafeString(existing, keyField) != keyString)
+            {
+                retained.Add(existing);
+            }
+        }
+        if (retained.Count != rows.Length)
+        {
+            this.Clear();
+            this.AddRange(retained);
+        }
+        removeKey(this.hashmap, keyString);
+        removeKey(this.newUpdatesBySymbol, keyString);
+        removeKey(this.seenUpdatesBySymbol, keyString);
+        removeKey(this.clearUpdatesBySymbol, keyString);
+        // a plain ArrayCache has no per-key ledger for the global scope - it counts
+        // raw appends - so only the keyed subclasses can retract exactly; there the
+        // seen set IS this key's contribution since the last global poll
+        HashSet<object> allSeen = null;
+        if ((keyString != null) && this.seenUpdatesAll.TryGetValue(keyString, out allSeen))
+        {
+            this.allNewUpdates = this.allNewUpdates - allSeen.Count;
+            this.seenUpdatesAll.Remove(keyString);
+        }
+    }
+
     public object getLimit(object symbol2, object limit2)
     {
         lock (this.lockObject)
@@ -364,6 +451,15 @@ public class ArrayCacheBySymbolById : ArrayCache
     public ArrayCacheBySymbolById(object maxSixe = null) : base(maxSixe)
     {
         this.nestedNewUpdatesBySymbol = true;
+    }
+
+    // removeSymbol () has to retract rows under the SAME nesting key append ()
+    // files them under, which is "outcome" for ArrayCacheByOutcomeById. Mirrors
+    // the TS `(this.keyField === undefined) ? 'symbol' : this.keyField` guard, so
+    // a subclass that leaves the field unset still falls back to "symbol".
+    protected override string getKeyField()
+    {
+        return (this.keyField == null) ? "symbol" : this.keyField;
     }
 
     public override void append(object item)

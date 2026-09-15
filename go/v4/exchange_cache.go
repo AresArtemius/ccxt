@@ -17,6 +17,11 @@ import "sync"
 
 type Appender interface{ Append(any) }
 
+// SymbolRemover is the dispatch target for cache.removeSymbol () in transpiled
+// WS handlers: the generated code holds the cache as `any`, so the call needs a
+// named interface the way Append goes through Appender.
+type SymbolRemover interface{ RemoveSymbol(any) }
+
 type CacheType interface {
 	*ArrayCache | *ArrayCacheByTimestamp | *ArrayCacheBySymbolById | *ArrayCacheByOutcomeById | *ArrayCacheBySymbolBySide | map[string]any
 
@@ -346,21 +351,43 @@ func (c *ArrayCache) GetLimit(symbol any, limit any) any {
 
 // removes all items with the given symbol from the cache
 func (c *ArrayCache) Remove(symbol string) {
+	c.RemoveSymbol(symbol)
+}
+
+// RemoveSymbol drops every row filed under `key` (the symbol for the
+// symbol-keyed caches, the outcome for ArrayCacheByOutcomeById) together with
+// its bookkeeping. A caller that has to invalidate a single key must NOT reach
+// for Clear(): that wipes the counters of every OTHER key too, and re-appending
+// the rows it meant to keep re-reports them to `newUpdates: false` consumers as
+// fresh updates. Mirrors removeSymbol () in ts/src/base/ws/Cache.ts.
+func (c *ArrayCache) RemoveSymbol(key any) {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
-	// Remove from hashmap
-	delete(c.Hashmap, symbol)
+	keyStr := ToString(key)
+	keyField := c.keyField
+	if keyField == "" {
+		keyField = "symbol"
+	}
 
-	delete(c.newUpdatesBySymbol, symbol)
-	delete(c.seenUpdatesBySymbol, symbol)
-	delete(c.clearUpdatesBySymbol, symbol)
+	delete(c.Hashmap, keyStr)
+	delete(c.newUpdatesBySymbol, keyStr)
+	delete(c.seenUpdatesBySymbol, keyStr)
+	delete(c.clearUpdatesBySymbol, keyStr)
 
-	// Filter out items with this symbol from Data
-	var filteredData []any
+	// a plain ArrayCache has no per-key ledger for the global scope - it counts
+	// raw appends - so only the keyed subclasses can retract exactly; there the
+	// seen set IS this key's contribution since the last global poll
+	if allSeen := c.seenUpdatesAll[keyStr]; allSeen != nil {
+		c.allNewUpdates -= allSeen.Size()
+		delete(c.seenUpdatesAll, keyStr)
+	}
+
+	// compact in place so the retained rows keep their order
+	filteredData := c.Data[:0]
 	for _, item := range c.Data {
 		if m, ok := item.(map[string]any); ok {
-			if s, ok := m["symbol"].(string); ok && s == symbol {
+			if cacheKeyOf(m, keyField) == keyStr {
 				continue // Skip this item
 			}
 		}
