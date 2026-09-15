@@ -3391,7 +3391,7 @@ class NewTranspiler {
 
         // ── Dynamic method dispatch for Object-typed variables ──
         // Dynamic method calls on Object-typed variables — use balanced paren matching
-        const dynamicMethods = ['append', 'reset', 'storeArray', 'store', 'getLimit'];
+        const dynamicMethods = ['append', 'reset', 'storeArray', 'store', 'getLimit', 'removeSymbol'];
         for (const method of dynamicMethods) {
             content = this.replaceDynamicMethodCall(content, method);
         }
