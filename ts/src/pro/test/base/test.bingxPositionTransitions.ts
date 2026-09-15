@@ -81,6 +81,21 @@ function testBingxPositionTransitions (ExchangeClass: typeof bingx = bingx) {
     const initiallyClosed = createExchange ();
     send (initiallyClosed, [ row ('0') ]);
     assert.equal (snapshot (initiallyClosed)[0]['side'], 'both', 'zero one-way position preserves the exchange side');
+    // retracting the one-way symbol must not perturb the update counters of any
+    // OTHER symbol. Rebuilding the cache (clear () + re-append the rows to keep)
+    // passes every assertion above, but re-counts the retained rows as new, so a
+    // watchPositions () consumer on newUpdates: false - exactly the mode this fix
+    // is about - gets untouched symbols re-reported as fresh updates.
+    const counters = createExchange ();
+    send (counters, [ row ('4', 'LONG', 'ETH'), row ('-5', 'SHORT', 'ETH'), row ('2') ]);
+    const countersCache = counters.positions as any;
+    // drain both poll scopes, so everything seeded above is already consumed
+    assert.equal (countersCache.getLimit (undefined, undefined), 3, 'the seeded rows are three new updates');
+    countersCache.getLimit ('ETH/USDT:USDT', undefined);
+    countersCache.getLimit ('LTC/USDT:USDT', undefined);
+    send (counters, [ row ('0') ]);
+    assert.equal (countersCache.getLimit (undefined, undefined), 1, 'only the one-way update is new, the untouched ETH sides are not re-reported');
+    assert.equal (snapshot (counters).length, 3, 'retracting LTC must leave both ETH sides in place');
 }
 
 export default testBingxPositionTransitions;
